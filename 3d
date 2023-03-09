@@ -1,0 +1,1648 @@
+classdef E_Jet_Jiashu_3d < matlab.apps.AppBase
+
+    % Properties that correspond to app components
+    properties (Access = public)
+        EJetWidjet                   matlab.ui.Figure
+        StageSettingsPanel           matlab.ui.container.Panel
+        CloseButton                  matlab.ui.control.Button
+        layerNoLabel                 matlab.ui.control.Label
+        LayerLabel                   matlab.ui.control.Label
+        Panel                        matlab.ui.container.Panel
+        GcodegeneratorButton         matlab.ui.control.Button
+        button_browse_stl_filename   matlab.ui.control.Button
+        textfield_stl_filename       matlab.ui.control.EditField
+        STLFileLabel                 matlab.ui.control.Label
+        SetRefButton                 matlab.ui.control.StateButton
+        ZaxisNum                     matlab.ui.control.NumericEditField
+        PeriodEditField              matlab.ui.control.NumericEditField
+        PeriodsEditFieldLabel        matlab.ui.control.Label
+        Zaxis                        matlab.ui.control.Label
+        Yaxis                        matlab.ui.control.Label
+        Xaxis                        matlab.ui.control.Label
+        ZSlider                      matlab.ui.control.Slider
+        ZSliderLabel                 matlab.ui.control.Label
+        YSlider                      matlab.ui.control.Slider
+        YSliderLabel                 matlab.ui.control.Label
+        XSlider                      matlab.ui.control.Slider
+        XSliderLabel                 matlab.ui.control.Label
+        RunStopButton                matlab.ui.control.StateButton
+        ZaxisVelocity                matlab.ui.control.NumericEditField
+        ZaxisEditFieldLabel          matlab.ui.control.Label
+        SpeedLabel                   matlab.ui.control.Label
+        XYaxesVelocity               matlab.ui.control.NumericEditField
+        XYaxesEditFieldLabel         matlab.ui.control.Label
+        StepEditField                matlab.ui.control.NumericEditField
+        StepmmEditFieldLabel         matlab.ui.control.Label
+        UIAxes21                     matlab.ui.control.UIAxes
+        UIAxes2_2                    matlab.ui.control.UIAxes
+        HVPowerSupplyPanel           matlab.ui.container.Panel
+        CurrentOUT                   matlab.ui.control.Label
+        Lamp                         matlab.ui.control.Lamp
+        CurrentEditField             matlab.ui.control.NumericEditField
+        CurrentALabel                matlab.ui.control.Label
+        VoltageEditField             matlab.ui.control.NumericEditField
+        VoltageVEditFieldLabel       matlab.ui.control.Label
+        PowerSupplyButton            matlab.ui.control.StateButton
+        SyringePumpPanel             matlab.ui.container.Panel
+        DirectionButtonGroup         matlab.ui.container.ButtonGroup
+        ReverseButton                matlab.ui.control.RadioButton
+        FrontButton                  matlab.ui.control.RadioButton
+        SyringePumpButton            matlab.ui.control.StateButton
+        PumpRateEditField            matlab.ui.control.NumericEditField
+        PumpRateLminLabel            matlab.ui.control.Label
+        SyringeDiamEditField         matlab.ui.control.NumericEditField
+        SyringeDiammmEditFieldLabel  matlab.ui.control.Label
+        LogText                      matlab.ui.control.TextArea
+        ExperimentLogTextAreaLabel   matlab.ui.control.Label
+    end
+
+
+    properties (Access = private)
+        LogMessage; % Description
+        Motor;
+        Keithley2290;
+        PI_Driver;
+        C863;
+        C867;
+        voltage;
+        current;
+        trajectory;
+        step;
+        POI;
+        parameterID;
+        direction;
+        ardiuno_board;
+        shield;
+        ReferenceZ;
+        log_file;
+        
+        printPause;
+        movelist;
+        z_slices;
+        testFlag;
+        finishedPrint;
+    end
+
+    methods (Access = private)
+
+        function done = Initialise_SyringePump(app)
+            done = false;
+            app.SyringePumpButton.Enable = false;
+            log_update(app, 'Syringe pump initialisation...');
+            i = 0;
+            comm_ports = "COM4"; %serialportlist("available");
+            while ~done
+                i = i + 1;
+                temptext = ['...trying ' char(comm_ports(1))];
+                log_update(app, temptext);
+                try
+                    app.ardiuno_board = arduino(comm_ports(i),'Uno','Libraries','Adafruit\MotorShieldV2');
+                    app.shield = addon(app.ardiuno_board,'Adafruit\MotorShieldV2');
+                    app.Motor = stepper(app.shield,1,200,'RPM', 1, 'stepType','Microstep');
+                    done = true;
+                    app.SyringePumpButton.Enable = true;
+                    log_update(app, 'Done');
+                catch ME %#ok<NASGU> 
+                    warning('Trying another serial port...');
+                end
+%                 if i > length(comm_ports)-1
+%                     log_update(app, 'Arduino is not found');
+%                     break
+%                 end
+            end
+            
+            % checking if the motor works
+            if done
+                writeDigitalPin(app.ardiuno_board, 'D3', 0);
+                for i=1:5
+                    move(app.Motor, -1);
+                end
+                release(app.Motor);
+                writeDigitalPin(app.ardiuno_board, 'D3', 1);
+                writeDigitalPin(app.ardiuno_board, 'D4', 0);
+                for i=1:5
+                    move(app.Motor, 1);
+                end
+                release(app.Motor);
+                writeDigitalPin(app.ardiuno_board, 'D4', 1);
+                log_update(app, 'Syringe pump connected');
+            end
+        end
+
+        function done = Initialise_PowerSupply(app)
+            done = false;
+            try
+                app.Keithley2290 = visadev("GPIB0::14::INSTR");
+                idn = writeread(app.Keithley2290, "*IDN?");
+                if contains(idn, 'KEITHLEY') == 1
+                    write(app.Keithley2290, "*RST");
+                    write(app.Keithley2290, "*WAI");
+                    write(app.Keithley2290, "*RCL 0");
+                    write(app.Keithley2290, "*WAI");
+                    write(app.Keithley2290, "ILIM 1E-3"); % 100 microAmp
+                    write(app.Keithley2290, "VLIM 1.5E3");
+                    write(app.Keithley2290, "VSET 0");
+                    done = true;
+                end
+            catch ME
+                if contains(ME.message, 'Resource string is invalid')
+                    log_update(app, 'Keithley 2250 is not detected on VISA');
+                end
+            end
+            
+            if done
+                app.PowerSupplyButton.Enable = true;
+                log_update(app, 'Power Supply is initialised');
+            else
+                log_update(app, 'Power Supply NOT initialised');
+            end
+
+        end
+
+        function Initialise_Stages(app)
+            done = [0 0];
+            %addpath('C:\Users\Public\PI\PI_MATLAB_Driver_GCS2');
+            addpath('C:\Program Files (x86)\Physik Instrumente (PI)\Software Suite\MATLAB_Driver');
+            app.PI_Driver = PI_GCS_Controller();
+            % first connect to C-863
+            app.C863 = struct;
+            i = 1;
+            while isempty(struct2cell(app.C863))
+                try
+                    app.C863 = app.PI_Driver.ConnectUSB('0021550377');
+                catch ME
+                    if contains(ME.message, 'Interface could not be opened or no controller is responding')
+                        log_update(app, 'C-863 controller is not responding or could not be opened.');
+                        log_update(app, '---Replug USB cable---');
+                    end
+                end
+                
+                if isempty(struct2cell(app.C863))
+                    pause(0.5);
+                end
+
+                i = i+1;
+                if i >= 4
+                    app.log_update(app, 'No more attempts will be undertaken.\nQuitting the program.');
+                    pause(1);
+                    break
+                end
+            end
+
+            if isempty(struct2cell(app.C863))
+                EJetWidjetCloseRequest(app);
+            else
+                app.C863 = app.C863.InitializeController();
+                log_update(app, app.C863.qIDN());
+                app.C863.VEL('1', app.ZaxisVelocity.Value);
+                app.C863.SVO('1', 1);
+                app.C863.FRF('1'); % z-axis
+                while 0 ~= app.C863.qFRF('1') == 0
+                   pause(0.1);
+                end
+                %app.C863.MOV('1', 0); % move the stage down
+                app.C863.GOH('1');
+                done(1) = 1;
+            end
+            
+            % connect to C-867
+            app.C867 = struct;
+            i = 1;
+            while isempty(struct2cell(app.C867))
+                try
+                    app.C867 = app.PI_Driver.ConnectTCPIP('192.168.0.75', 50000);
+                catch ME
+                    if contains(ME.message, 'Interface could not be opened or no controller is responding')
+                        log_update(app, 'C-867 controller is not responding or could not be opened.');
+                        log_update(app, '---Reboot C-867 controller---');
+                    end
+                end
+
+                if isempty(struct2cell(app.C867))
+                    pause(0.5);
+                end
+                i = i+1;
+                if i>=4
+                    log_update(app, 'No more attempts will be undertaken.\nQuitting the program.');
+                    pause(1);
+                    break
+                end
+            end
+            
+            if isempty(struct2cell(app.C867))
+                EJetWidjetCloseRequest(app);
+            else
+                TrajectoryListValueChanged(app);
+                app.C867 = app.C867.InitializeController();
+                log_update(app, app.C867.qIDN());
+                app.C867.SVO('1 2', [1 1]);
+                app.C867.FRF('1 2'); % referencing x-y axes
+                while 0 ~= app.C867.qFRF('1 2') == [0 0]
+                   pause(0.1);
+                end
+                done(2) = 1;
+                Position(app);
+            end
+            if done
+                app.RunStopButton.Enable = 1;
+            end
+            % TODO
+            %app.C867.TGT(500); % Set timing for trajectories
+            %app.C867.TGC([1 2]); % Delete all points of a trajectory
+            % check what is the maximum points in trajectory buffer
+            % default closed-loop velosity 150 Unit/s
+            bufferSize = app.C867.qSPA('1', hex2dec('22000020'));
+            log_update(app, ['C867 trajectory buffer size: ', num2str(bufferSize)]);
+        end
+        %% hard code lines
+                %%%%%%%%%%%%%% %%%%%%%%%%%%%% %%%%%%%%%%%%%% %%%%%%%%%%%%%% %%%%%%%%%%%%%%
+        function trajectory = parallel_lines(app, step, POI)
+            if max(POI)>22
+                POI = [20 20];
+                log_update(app, 'Point of interest is out of range');
+            end
+            %step        = app.StepEditField.Value;
+            axes_lim    = [-11 11]; % always square 22x22
+            axes_len    = axes_lim(2) - axes_lim(1);
+            num_points  = round(POI(2)/step*3);
+            line_points = 3; % points in one line
+            start       = [axes_lim(1)+(axes_len(1)-POI(1))/2 axes_lim(1)+(axes_len(1)-POI(2))/2];
+            trajectory  = zeros(num_points,2);
+
+            for j =1:round(POI(2)/step) + 1
+                y = start(2) + (j-1)*step;
+                for i = 1:line_points
+                    if rem(j,2) == 0
+                        stop = POI(1)/2;
+                        x = stop - (i-1)*POI(1)/(line_points - 1);
+                        idx = (j - 1)*line_points + i;
+                        trajectory(idx,:) = [x y];
+                    else
+                        x = start(1) + (i-1)*POI(1)/(line_points - 1);
+                        idx = (j - 1)*line_points + i;
+                        trajectory(idx,:) = [x y];
+                    end
+                end
+            end
+        end
+
+        %%%%%%%%%%%%%% %%%%%%%%%%%%%% %%%%%%%%%%%%%%
+        % method for generating the square trajectory for XY stage
+        function trajectory = squares(app,step, POI)
+            if max(POI)>22
+                POI = [20 20];
+                
+            end
+            axes_lim    = [-11 11]; % always square 22x22
+            axes_len    = axes_lim(2) - axes_lim(1);
+            num_points  = round(POI(2)/step*3);
+            line_points = 4; % points in one line
+            start       = [axes_lim(1)+(axes_len(1)-POI(1))/2 axes_lim(1)+(axes_len(1)-POI(2))/2];
+            trajectory  = zeros(num_points,2);
+            % horisontal lines
+            for j =1:round(POI(2)/step)+1
+                y = start(2) + (j-1)*step;
+                for i = 1:line_points
+                    if rem(j,2) == 0
+                        stop = POI(1)/2;
+                        x = stop - (i-1)*POI(1)/(line_points - 1);
+                        idx = (j - 1)*line_points + i;
+                        trajectory(idx,:) = [x y];
+                    else
+                        x = start(1) + (i-1)*POI(1)/(line_points - 1);
+                        idx = (j - 1)*line_points + i;
+                        trajectory(idx,:) = [x y];
+                    end
+                end
+            end
+            if rem(j,2) == 0
+                sign = 1;
+            else
+                sign = -1;
+            end
+            trajectory(end,:) = trajectory(end,:) + sign*[step 0];
+            start = trajectory(end,:);
+            for k =1:round(POI(1)/step)-1 %#ok<FXUP> 
+                x = start(1) + sign*(k-1)*step;
+                if rem(k,2) == 1
+                    a = draw_down(x, POI,line_points);
+                else
+                    a = draw_up(x, POI,line_points);
+                end
+                trajectory = [trajectory; a];  
+            end
+
+            % aux functions
+            function line_y = draw_down(xx, lims, pts)
+                line_y = zeros(pts+1, 2); % DEBUG
+                for k = 1:pts+1 %#ok<FXUP> 
+                    yy = lims(2)/2 - (k-1)*lims(2)/(pts);
+                    line_y(k,:) = [xx yy];
+                end
+            end
+            function line_y = draw_up(xx, lims, pts)
+                line_y = zeros(pts+1, 2); % DEBUG
+                for k = 1:pts+1 %#ok<FXUP> 
+                    yy = -lims(2)/2 + (k-1)*lims(2)/(pts);
+                    line_y(k,:) = [xx yy];
+                end
+            end
+        end
+
+        %%%%%%%%%%%%%% %%%%%%%%%%%%%% %%%%%%%%%%%%%%
+        % method for generating the triangle trajectory for XY stage
+        function trajectory = triangle(app,step,range)
+            if max(range)>22
+                range = [20 20];
+                
+            end
+
+            axes_lim = [-11 11]; % always square 22x22
+            axes_len = axes_lim(2) - axes_lim(1);
+            start    = [axes_lim(1)+(axes_len(1)-range(1))/2 axes_lim(1)+(axes_len(1)-range(2))/2];
+            num_points  = round(range(2)/step*3);
+            trajectory  = zeros(num_points,2); %#ok<PREALL> 
+            trajectory = start;
+
+            for j = 1:round(range(2)/(step*sin(pi*60/180)))
+                if rem(j,2)==1
+                    a0 = start + [0 (j-1)*step*sin(pi*60/180)];
+                    for i = 1:round(range(1)/step)
+                        b = a0+cell(step) + [(i-1)*step 0];
+                        trajectory = [trajectory; b];  
+                    end
+                else
+                    a0 = start + ...
+                        + [round(range(1)/step)*step (j-1)*step*sin(pi*60/180)] - ...
+                        - [step*cos(pi*60/180) 0];
+                    for i = 1:round(range(1)/step)
+                        b = a0 + cell(step) - [(i-0)*step 0];
+                        trajectory = [trajectory; b];
+                    end
+                end
+            end
+            function tri = cell(side)
+                tri(1,:) = [0 0];
+                tri(2,:) = side*[cos(pi*60/180) sin(pi*60/180)];
+                tri(3,:) = [side 0];
+                tri(4,:) = [0 0];
+            end
+        end
+
+        function trajectory = hexagon(app,step, POI)
+            range = POI;
+            
+            if max(range)>22
+                range = [20 20];
+                
+            end
+
+            axes_lim = [-11 11]; % always square 22x22
+            axes_len = axes_lim(2) - axes_lim(1);
+
+            %hexagon height and width
+            height      = cos(30*pi/180)*2*step;
+            %width       = 2*step;
+
+            K           = range(1)/(3*step);
+            M           = floor(range(2)/height);
+            % need to round 0.5 fraction to the smallest number
+            % Matlab makes round(0.5) equals to 1, so need to make it =0
+            if round(K)- K == abs(0.5)
+                K = floor(K);
+            else
+                K = round(K);
+            end
+
+            hexagon_X_number = K;
+            joints_number    = K - 1;
+            if range(1) >= 3*step*K + step/2
+                joints_number = K;
+            end
+            hexagon_Y_number = M;
+            flag = false;
+            if range(2) >= M*height + height/2
+                % extra line needed
+                flag = true;
+            end
+            trajectory = [];
+            for n=1:hexagon_Y_number
+                start = [axes_lim(1)+(axes_len(1)-range(1))/2 axes_lim(1)+(axes_len(1)-POI(2))/2+height/2];
+                start = [start(1) start(2)+height*(n-1)];
+                m = length(trajectory);
+                % draw a bottom half of the hexagons
+                for i = 1:hexagon_X_number
+                    x = start(1) + [0 sin(30*pi/180)*step sin(30*pi/180)*step+step 2*step];
+                    y = start(2) - [0 cos(30*pi/180)*step cos(30*pi/180)*step 0];
+
+                    for j = 1:4
+                        trajectory(m+4*(i-1)+j,:) = [x(j) y(j)];  
+                    end
+                    start = [start(1)+3*step start(2)];
+                end
+
+                % if needed draw middle hexagon
+                if joints_number == hexagon_X_number
+                    % need to skip this step when drawing the last row
+                    % if flag==0
+
+                    if n == hexagon_Y_number && flag == false
+                        % do nothing
+                    else
+                        x(end) = x(end)+step;
+                        trajectory(end+1,:) = [x(end) y(end)]; %#ok<*AGROW> 
+                        trajectory(end+1,:) = [x(end)+step*sin(30*pi/180) y(end)+step*cos(30*pi/180)];
+                        trajectory(end+1,:) = [x(end) y(end)+2*step*cos(30*pi/180)];
+                        trajectory(end+1,:) = [x(end)-step y(end)+2*step*cos(30*pi/180)];
+                        trajectory(end+1,:) = [x(end)-step*(1+sin(30*pi/180)) y(end)+step*cos(30*pi/180)];
+                        trajectory(end+1,:) = [x(end)-step y(end)];
+                        x(end) = x(end)-step;
+                    end
+                end
+
+                % complete the hexagons with top half
+                start = [x(end) y(end)];
+                l = length(trajectory);
+                for i = 1:hexagon_X_number
+                    x = start(1) - [0 sin(30*pi/180)*step sin(30*pi/180)*step+step 2*step];
+                    y = start(2) + [0 cos(30*pi/180)*step cos(30*pi/180)*step 0];
+                    for j = 1:4
+                        trajectory(l+4*(i-1)+j,:) = [x(j) y(j)];
+                    end
+                    start = [start(1)-3*step start(2)];
+                end
+            end
+
+            if flag
+                start = [start(1)+step start(2)+height];
+                l = length(trajectory);
+                % draw a bottom half of the hexagons
+                for i = 1:hexagon_X_number
+                    x = start(1) + [0 sin(30*pi/180)*step sin(30*pi/180)*step+step 2*step];
+                    y = start(2) - [0 cos(30*pi/180)*step cos(30*pi/180)*step 0];
+                    for j = 1:4
+                        trajectory(l+4*(i-1)+j,:) = [x(j) y(j)];
+                    end
+                    start = [start(1)+3*step start(2)];
+                end
+            end
+        end
+
+        function trajectory = circles(app,step)
+            
+            theta_stop = 2 + 2*step;
+            theta = pi:pi*(theta_stop - 1)/199:pi*theta_stop;
+
+            r = 2;
+            x = r.*cos(theta) + 5/10*theta;
+            y = r.*sin(theta);
+            %correction
+
+            x = 20/(max(x)-x(1)).*(x - x(1)) - 10;
+            y = 2.*y;
+            trajectory = transpose([x; y]);
+
+        end
+
+        function trajectory = spiral(app,step)
+            
+            theta = 0:2*pi*step/(step*50-1):2*pi*step;
+
+            r = 10/sqrt(theta(end)).*sqrt(theta);
+            x = r.*cos(theta);
+            y = r.*sin(theta);
+            % rotate spiral to always start at (-r,0)
+            if x(end)>0
+                alpha = -asin(y(end)/10) + pi;
+            else
+                alpha = asin(y(end)/10);
+            end
+            a = x*cos(alpha) - y*sin(alpha);
+            b = x*sin(alpha) + y*cos(alpha);
+            c = -a;
+            d = -b;
+
+            trajectory = flip(transpose([a; b]));
+            trajectory = [trajectory; transpose([c; d])];
+        end
+        function results = retreivePOI(app,entry_string)
+            results = [0 0];
+            CreateStruct.Interpreter = 'tex';
+            CreateStruct.WindowStyle = 'modal';
+            temp = entry_string;
+            if ~contains(temp,'*') && ~contains(temp,'x')
+                warndlg(['\fontsize{16} \color{red!70} Use X{\times}Y' ...
+                    ' format!'], 'Incorrect entry', CreateStruct);
+                return
+            end
+            for i = 1:length(temp)
+                if temp(i) == 'x' || temp(i) == '*'
+                    results(1) = str2double(temp(1:i-1));
+                    results(2) = str2double(temp(i+1:end));
+                end
+            end
+            results = [15 15];
+            if any(results <= 0)
+                warndlg(['\fontsize{16} \color{red!70} POI value' ...
+                    ' must be positive!'], 'Incorrect entry', CreateStruct);
+                return
+            end
+            if any(results > 22)
+                warndlg(['\fontsize{16} POI value' ...
+                    ' must be \leq 25!'], 'Out of range', CreateStruct);
+                return
+            end
+            
+        end
+        function [movelist,zvalues] = getTrajectoryListValue(app)
+%             value = app.TrajectoryList.Value;
+%             traj_name = app.TrajectoryList.Value
+            app.step  = 1;%app.StepEditField.Value;
+            temp = "15x15";%app.POIEditField.Value;
+            app.POI = retreivePOI(app,temp);
+            values = {'Square','Parallel lines','Triangle','Circle','Hexagon','Spiral'};
+            movelist = {};
+            curStep = 1;
+            curPOI = [15 15];
+            for i = 1:length(values)
+                value = values{i};
+                switch value
+                    case 'Square'
+                        app.trajectory = squares(app,curStep, curPOI);
+                        
+                    case 'Parallel lines'
+                        app.trajectory = parallel_lines(app,curStep, curPOI);
+                        
+                    case 'Triangle'
+                        app.trajectory = triangle(app,curStep, curPOI);
+                        
+                    case 'Circle'
+                        app.trajectory = circles(app,curStep);
+                        
+                    case 'Hexagon'
+                        app.trajectory = hexagon(app,curStep, curPOI);
+                        
+                    case 'Spiral'
+                        app.trajectory = spiral(app,curStep);
+                        
+                end
+                size(app.trajectory)
+                movelist(i) = {app.trajectory};
+                zvalues(i+1) = i*0.2;
+            end
+        end
+
+
+        %%
+        function PostionInfo(app,z)
+            if app.testFlag == 0
+                x = app.C867.qPOS('1');
+                y = app.C867.qPOS('2');
+                z = app.C863.qPOS('1');
+            else
+                x = app.trajectory(1,1);
+                y = app.trajectory(1,2);
+            end
+            app.Xaxis.Text = num2str(round(x, 2));
+            app.Yaxis.Text = num2str(round(y, 2));
+            app.Zaxis.Text = num2str(round(z, 2));
+        end
+        function Position(app)
+            if app.testFlag == 0
+                x = app.C867.qPOS('1');
+                y = app.C867.qPOS('2');
+                z = app.C863.qPOS('1');
+                app.Xaxis.Text = num2str(round(x, 2));
+                app.Yaxis.Text = num2str(round(y, 2));
+                app.Zaxis.Text = num2str(round(z, 2));            
+            end
+
+        end 
+        
+        function log_update(app, new_message)
+           new_message = [datestr(now,'HH:MM:SS '), new_message];
+
+%            tempMeassage = fprintf('%s %s %s %s',new_message);
+%            fprintf(app.log_file, '%s %s %s %s\n',new_message);
+%            
+% %            app.LogText.Value = [app.LogText.Value; new_message];
+%             
+%            app.LogText.Value = [app.LogText.Value; tempMeassage];
+
+           fprintf(app.log_file, [new_message '\n']);
+           app.LogText.Value = [app.LogText.Value; new_message];
+           scroll(app.LogText, 'bottom'); 
+        end
+        %%
+        function printLayer_move(app,zValue)
+                % disable the sliders to prevent conflicting movement
+                % TODO
+                disp(size(app.trajectory,1))
+                %去掉nan
+                app.trajectory = removeNaNData(app.trajectory,0);
+                disp("new xy value")
+                disp(app.trajectory)
+                if app.testFlag == 0
+                    app.C867.SVO('1 2', [1 1]);
+                    app.C863.SVO('1', 1);
+                    % move stage to start position
+                    app.C867.MOV('1 2', app.trajectory(1,:));
+                end
+                pause(0.2);
+
+
+                PostionInfo(app,zValue);
+                % prepare trajectory
+                trajectoryIDs = [1, 2];
+
+                %app.C867.TGT(rate);
+                if app.testFlag == 0
+                    app.C867.TGT(2000); % DEBUG  3000
+                    app.C867.TGC(trajectoryIDs); % Delete all points of a trajectory
+                end
+
+                % start trajectories
+                disp(app.step);
+                traj_name = "3Drinter";
+                %log_update(app, ['Start ' traj_name ' with ' num2str(app.step)]);
+                log_update(app, ['Needle-substrate distance is ' num2str(app.ZaxisNum.Value)]);
+                testMovingTime = 10;
+                disp(size(app.trajectory,1))
+                for i = 2:size(app.trajectory,1)
+                    i
+                    if app.testFlag == 0 
+                        app.C867.SVO('1 2', [1 1]);
+%                         app.C867.TGC([1 2]);
+                        while 1
+                            moveInfo = app.C867.IsMoving('1 2')
+                            if ~any(moveInfo)
+                                app.C867.TGC([1 2]);
+                                fprintf('[%f; %f] true\n', app.C867.qPOS('1'), app.C867.qPOS('2'))
+    %                             fprintf('[%f; %f] true\n', app.trajectory(i,1), app.trajectory(i,2))
+                                app.C867.MOV('1 2', app.trajectory(i,:));
+                                disp("moved ")
+                                break
+                            end
+                        end
+
+                    else
+                        app.trajectory(i,:)
+                        fprintf('[%f; %f] test\n', app.trajectory(i,1), app.trajectory(i,2))
+                    end
+%                     pause(0.2);
+                end
+                if app.testFlag == 0
+                    app.C867.TGC([1 2]);
+                end
+                
+                if app.testFlag == 0
+                    app.C863.SVO('1', 1);
+                    app.C863.MOV('1', zValue);
+                end
+                if app.testFlag == 0
+%                     app.C863.TGC(1);
+                end
+                log_update(app, 'currnt Trajectory finished');
+%                 app.C863.TGC([1 2]);
+                pause(0.1);
+                Position(app);
+        end
+        
+        function printLayer_tgs(app,zValue)
+                % disable the sliders to prevent conflicting movement
+                % TODO
+                disp(app.testFlag)
+                disp(app.testFlag == 1)
+                
+                disp("xy values:")
+                disp(app.trajectory);
+                disp("z value")
+                disp(zValue)
+                %去掉nan
+                app.trajectory = removeNaNData(app.trajectory,0);
+                disp("new xy value")
+                disp(app.trajectory)
+                if app.testFlag == 0
+                    app.C867.SVO('1 2', [1 1]);
+                    app.C863.SVO('1', 1);
+                    % move stage to start position
+                    app.C867.MOV('1 2', app.trajectory(1,:));
+                end
+                pause(2);
+                % while any(app.C867.IsMoving('1 2'))                        
+                % ause(0.1);     
+                % end
+
+%                 Position(app);
+                PostionInfo(app,zValue);
+                % prepare trajectory
+                trajectoryIDs = [1, 2];
+                if app.testFlag == 0
+                    servotime   = app.C867.qSPA('1', hex2dec('E000200'));
+                else
+                    servotime = 4000;
+                end
+
+                fprintf('Servotime = %f', servotime);
+                period      = app.PeriodEditField.Value; % this is period in seconds
+                pnts        = length(app.trajectory);
+                rate        = round(period/pnts/servotime);
+                fprintf('rate = %f', rate);
+                %app.C867.TGT(rate);
+                if app.testFlag == 0
+                    app.C867.TGT(2000); % DEBUG  3000
+                    app.C867.TGC(trajectoryIDs); % Delete all points of a trajectory
+                end
+                bufferSize = 2000;
+                if any(length(app.trajectory) >= bufferSize)
+                    numberOfInitiallValues = bufferSize;
+                else
+                    numberOfInitiallValues = length(app.trajectory);
+                end
+                
+                % fill buffer
+                for idx = 1 : numberOfInitiallValues
+                    if app.testFlag == 0
+                        app.C867.TGA(trajectoryIDs, app.trajectory(idx,:));
+                    end
+                end
+                % start trajectories
+                disp(app.step);
+                traj_name = "3Drinter"
+                %log_update(app, ['Start ' traj_name ' with ' num2str(app.step)]);
+                log_update(app, ['Needle-substrate distance is ' num2str(app.ZaxisNum.Value)]);
+                if app.testFlag == 0
+                    app.C867.TGS(trajectoryIDs);
+                end
+                while 1
+                    if idx == length(app.trajectory)
+                        break;
+                    end
+                
+                    %Position(app);
+                    % get number of trajectory points currently stored on controller
+                    if app.testFlag == 0
+                        valuesInControllerBuffer = app.C867.qTGL(trajectoryIDs);
+                    else
+                        valuesInControllerBuffer = 100;
+                    end
+                    %disp(valuesInControllerBuffer)
+
+                    if any(valuesInControllerBuffer < bufferSize)
+                        % append points to trajectories on controller
+                        if app.testFlag == 0
+                            app.C867.TGA(trajectoryIDs, app.trajectory(idx,:));
+                        end
+                        idx = idx + 1;
+                    else
+                        pause (app.printPause);
+                    end
+                end
+
+                % tell the controller that no more points are added to the trajectory
+                if app.testFlag == 0
+                    app.C867.TGF(trajectoryIDs);
+                end
+                
+                %app.C867.TGC([1 2]);
+                if app.testFlag == 0
+                    valuesInControllerBuffer = app.C867.qTGL(trajectoryIDs); 
+                else
+                    valuesInControllerBuffer = 200;
+                end
+                %disp(valuesInControllerBuffer);
+                
+                % wait for controller to finish trajectories
+                while any(valuesInControllerBuffer)
+                    %disp(valuesInControllerBuffer);
+                    if app.testFlag == 0
+                        valuesInControllerBuffer = app.C867.qTGL(trajectoryIDs);
+                    else
+                        valuesInControllerBuffer = 0;
+                    end
+                    if app.testFlag == 0
+                        fprintf('[%f; %f], buffer = %d\n', app.C867.qPOS('1'), app.C867.qPOS('2'), valuesInControllerBuffer(1));
+                    end
+                    pause(0.1);
+                    %Position(app);
+                end
+                if app.testFlag == 0
+                    app.C867.TGC([1 2]);
+                end
+                
+                log_update(app, 'currnt Trajectory finished');
+                if app.testFlag == 0
+                    app.C863.SVO('1', 1);
+                    app.C863.MOV('1', zValue);
+                end
+%                 app.C863.TGC([1 2]);
+                pause(0.1);
+                Position(app);
+        end
+        
+        %%
+        %%%%%%%%%%%%%% %%%%%%%%%%%%%% %%%%%%%%%%%%%% %%%%%%%%%%%%%% %%%%%%%%%%%%%%
+        
+        %%
+        
+    end
+
+    % Callbacks that handle component events
+    methods (Access = private)
+
+        % Code that executes after component creation
+        function startupFcn(app)
+            app.printPause = 0.1;
+            app.testFlag = 0; % 0-生产环境 1--测试
+            app.finishedPrint = 0;
+            %clearvars
+            %closereq
+            % create the logging file
+            % OneDrive - University of Warwick/Documents/MATLAB/Micro3DP_Setup
+            if string(computer('arch')) == "maci64"
+                main_path = [getenv('HOME') '/Documents/MATLAB/e-jet_setup/' datestr(today("datetime"))];
+            elseif string(computer('arch')) == "win64" 
+                main_path = [getenv('USERPROFILE') '\Documents\MATLAB\Micro3DP_Setup\' datestr(today("datetime"))];
+            end
+            mkdir(main_path);
+            warning('off', 'MATLAB:MKDIR:DirectoryExists');
+            %cd(main_path);
+            app.log_file = fopen([main_path 'ejetlog.log'],'w');
+            fprintf(app.log_file, [datestr(now,'dd.mm.yyyy HH:MM:SS '), 'Logging started\n']); 
+            app.ReferenceZ = 0;
+            TrajectoryListValueChanged(app);
+            if exist(app.PI_Driver, "var")
+                app.C867.CloseConnection();
+                app.C863.CloseConnection();
+                app.PI_Driver.Destroy();
+                clear app.PI_Driver app.C867 app.C863
+            end
+            
+            if exist('app.C867','var')
+                app.C867.CloseConnection;
+                clear app.C867
+            end
+            app.RunStopButton.Enable = false;
+            app.SyringePumpButton.Enable = false;
+            app.PowerSupplyButton.Enable = false;
+            log_update(app, 'Initialisation of all the hardware started');
+
+            Initialise_SyringePump(app);
+            Initialise_PowerSupply(app);
+            Initialise_Stages(app);
+
+
+
+        end
+
+        % Value changed function: LogText
+        function LogTextValueChanged(app, event)
+            %value = app.LogText.Value;
+
+        end
+
+        % Value changed function: SyringePumpButton
+        function SyringePumpButtonPressed(app, event)
+            if app.ReverseButton.Value == 1
+                app.direction = 1;
+                led = 'D4';
+            elseif app.FrontButton.Value == 1
+                app.direction = -1;
+                led = 'D3';
+            end
+            % this part needs attention
+            % need to calibrate RPM to set accurate RPM
+            diam = app.SyringeDiamEditField.Value; %#ok<NASGU> 
+            rate = app.PumpRateEditField.Value;  
+            p = 0.3432 * 3 / rate; %pause
+            if rate >=6 
+                % TODO
+                % need add code for rate >6
+                p = 0;
+            end
+            while app.SyringePumpButton.Value == 1
+                writeDigitalPin(app.ardiuno_board, led, 0);
+                move(app.Motor, app.direction);
+                pause(p);
+                if app.SyringePumpButton.Value == 0
+                    release(app.Motor);
+                    log_update(app,'Syringe pump halted');
+                    writeDigitalPin(app.ardiuno_board, led, 1);
+                    break
+                end
+            end
+            release(app.Motor);
+            writeDigitalPin(app.ardiuno_board, led, 1);
+        end
+
+        % Value changed function: PowerSupplyButton
+        function PowerSupplyButtonPressed(app, event)
+            if app.PowerSupplyButton.Value == 1
+                app.Lamp.Color = [1 0 0];
+                app.LogText.Value = [app.LogText.Value; 'Caution: High Voltage'];
+                app.voltage = app.VoltageEditField.Value;
+                app.current = app.CurrentEditField.Value;
+                write(app.Keithley2290, "VLIM 2000");
+                write(app.Keithley2290, "ILIM " + num2str(app.current) + "E-6");
+                write(app.Keithley2290, "ITRP 1E-3");
+                write(app.Keithley2290, "TMOD 1"); % sets the trip reset mode to automatic
+                write(app.Keithley2290, "*WAI");
+                write(app.Keithley2290, "VSET " + num2str(app.voltage));
+                write(app.Keithley2290, "HVON");
+                log_update(app, ['Voltage = ' num2str(app.voltage) 'applied'] );
+            else
+                write(app.Keithley2290, "HVOF");
+                write(app.Keithley2290, "*RST");
+                app.Lamp.Color = [0.902 0.902 0.902];
+                %app.VoltageEditField.Value = 0;
+                %app.CurrentEditField.Value = 0;
+            end
+            while app.PowerSupplyButton.Value == 1
+                i_trip = writeread(app.Keithley2290, "ITRP?"); % page31 Manual
+                current_out = writeread(app.Keithley2290, "IOUT?");
+                fprintf('I_trip = %f, I = %f\n', i_trip, str2double(current_out)*1e6);
+                if str2double(i_trip) > 1e-3
+                    % TODO
+                    write(app.Keithley2290, "TCLP"); % clears any voltage or current trips
+                    app.CurrentOUT.Text = double2str(round(1e3*str2double(current_out), 3));
+                    %write(app.Keithley2290, "ITRP 1E-3");
+                end
+                pause(0.5);
+            end
+
+        end
+
+        % Close request function: EJetWidjet
+        function EJetWidjetCloseRequest(app, event)
+            try
+                if exist('app.C867','var')
+                    app.C867.CloseConnection;
+                    clear app.C867
+                elseif exist('app.C863', 'var')
+                    app.C863.CloseConnection;
+                    clear app.C863
+                elseif exist('app.Keithley2290', 'var')
+                    flush(app.Keithley2290);
+                elseif exist('app.Motor', 'var')
+                    clear app.Motor app.ardiuno_board
+                end
+                app.PI_Driver.Destroy;
+                clearvars
+                closereq
+                %
+                delete(app);
+            catch ME
+                disp(ME.identifier)
+            end
+
+        end
+
+        % Value changed function: VoltageEditField
+        function VoltageEditFieldValueChanged(app, event)
+            app.voltage = app.VoltageEditField.Value;
+            write(app.Keithley2290, "VSET " + num2str(app.voltage));
+        end
+
+        % Value changed function: CurrentEditField
+        function CurrentEditFieldValueChanged(app, event)
+            app.current = app.CurrentEditField.Value;
+            write(app.Keithley2290, "ILIM " + num2str(app.current) + "E-6");
+        end
+
+        % Value changed function: RunStopButton
+        function RunStopButtonValueChanged(app, event)
+            if isempty(app.movelist)%无数据
+                    return;
+            end
+            if app.testFlag == 0
+                app.C867.TGC([1 2]);
+%                 app.C863.TGC(1);
+            end
+            %app.C867.GOH('1 2');
+            %pause(2);
+            disp(app.RunStopButton.Value)
+            if app.RunStopButton.Value == 1
+                % disable the sliders to prevent conflicting movement
+                % TODO
+                
+                for curlayerIndex = 1:length(app.movelist)
+
+                    mlst_all = app.movelist{curlayerIndex};
+                    z = app.z_slices(curlayerIndex+1);
+                    cur_trajectory = [];
+%                     app.finishedPrint = 0;
+                    if length(mlst_all) >0
+                        for j = 1:size(mlst_all,1)-1
+                            x = mlst_all(j,1); y = mlst_all(j,2); 
+                            
+                            cur_trajectory(j,:) = [x y];
+                             
+                        end
+                        if length(cur_trajectory) == 0
+                            continue
+                        end
+                        app.trajectory = cur_trajectory
+%                         continue;%test
+                        app.layerNoLabel.Text = num2str(curlayerIndex);
+%                         try
+%                             printLayer_tgs(app,z);
+                            printLayer_move(app,z);
+%                         catch
+%                             app.finishedPrint = 1;
+%                             continue;
+                            
+%                         end
+                    end 
+%                     if app.finishedPrint == 1
+%                         continue
+%                     end
+                end
+                % release the button
+                app.RunStopButton.Value = 0;
+                app.finishedPrint = 0;
+                log_update(app, 'Trajectory finished');
+                if app.testFlag == 0
+                %turn off power supply
+                    write(app.Keithley2290, "VSET 0");
+                    write(app.Keithley2290, "HVOF");
+                end
+                
+                app.PowerSupplyButton.Value = 0;
+
+                % move stage to home position
+                if app.testFlag == 0
+                    app.C863.SVO('1', 1);
+                    app.C863.MOV('1', 0);
+                    app.C867.MOV('1 2', [0 0]);
+                end
+                Position(app);
+
+            else
+                %stop movement
+                %   
+%                 disp(app.C867.IsMoving('1 2'))
+%                 if any(app.C867.IsMoving('1 2'))
+%                     app.C867.HLT('1 2');
+%                     app.C867.STP();
+%                     
+%                 end
+                %app.C867.HLT('1 2');
+                if app.testFlag == 0
+                    app.C867.STP();
+                end
+                Position(app);
+
+                % if error "Dot indexing is not supported for variables of this type."
+                % try this:
+                % controller = findobj(0, 'tag', 'C867');
+                % set(controller, 'string', HLT('1 2'));
+                %app.C863.GOH;
+                
+                %turn off the HV power supply
+                if app.testFlag == 0
+                    write(app.Keithley2290, "VSET 0");
+                    write(app.Keithley2290, "HVOF");
+                end
+                app.PowerSupplyButton.Value = 0;
+                %app.C867.CloseConnection();
+                %app.C863.CloseConnection();
+
+            end
+
+
+        end
+
+        % Callback function
+        function TrajectoryListValueChanged(app, event)
+            
+        end
+
+        % Value changed function: StepEditField
+        function StepEditFieldValueChanged(app, event)
+            app.step = app.StepEditField.Value;
+            TrajectoryListValueChanged(app, event);
+        end
+
+        % Callback function
+        function POIEditFieldValueChanged(app, event)
+            app.POI = [0 0];
+            temp = app.POIEditField.Value;
+            app.POI = retreivePOI(app,temp);
+            TrajectoryListValueChanged(app, event);
+        end
+
+        % Value changing function: XSlider
+        function XSliderValueChanging(app, event)
+            changingValue = event.Value;
+            app.C867.SVO('1 2', [1 1]);
+            app.C867.MOV('1', changingValue);
+            Position(app);
+        end
+
+        % Value changing function: YSlider
+        function YSliderValueChanging(app, event)
+            changingValue = event.Value;
+            app.C867.SVO('1 2', [1 1]);
+            app.C867.MOV('2', changingValue);
+            Position(app);
+        end
+
+        % Value changing function: ZSlider
+        function ZSliderValueChanging(app, event)
+            changingValue = event.Value;
+            app.ZaxisNum.Value = changingValue;
+            app.C863.MOV('1', changingValue);
+            Position(app);
+        end
+
+        % Selection changed function: DirectionButtonGroup
+        function DirectionButtonGroupSelectionChanged(app, event)
+            %selectedButton = app.DirectionButtonGroup.SelectedObject;
+            if app.ReverseButton.Value
+                app.direction = 1;
+            else
+                app.direction = -1;
+            end
+
+        end
+
+        % Value changed function: PumpRateEditField
+        function PumpRateEditFieldValueChanged(app, event)
+            %rate = app.PumpRateEditField.Value;
+            
+        end
+
+        % Value changed function: ZaxisNum
+        function ZaxisNumValueChanged(app, event)
+            fprintf('Reference in ZaxisNum = %f\n', app.ReferenceZ);
+            ZaxisValue = app.ZaxisNum.Value + app.ReferenceZ;
+            app.ZSlider.Value = ZaxisValue;
+            app.C863.MOV('1', app.ZSlider.Value);
+            Position(app);
+        end
+
+        % Value changed function: SetRefButton
+        function SetRefButtonValueChanged(app, event)
+            app.ReferenceZ = app.ZaxisNum.Value;
+            app.ZaxisNum.Value =  app.ZaxisNum.Value - app.ReferenceZ;
+            fprintf('Reference in SetRefBtn = %f\n', app.ReferenceZ);
+            log_update(app, ['Z-axis reference is ' num2str(app.ReferenceZ)]);
+        end
+
+        % Value changed function: ZaxisVelocity
+        function ZaxisVelocityValueChanged(app, event)
+            app.C863.VEL('1', app.ZaxisVelocity.Value);  
+        end
+
+        % Value changed function: XYaxesVelocity
+        function XYaxesVelocityValueChanged(app, event)
+            app.C867.VEL('1 2', [app.ZaxisVelocity.Value app.ZaxisVelocity.Value]);
+        end
+
+        % Button pushed function: button_browse_stl_filename
+        function button_browse_stl_filenameButtonPushed(app, event)
+            %%
+            [file, path] = uigetfile('*.stl');
+            full_file_path_name = strcat(path,file);
+            app.textfield_stl_filename.Value = full_file_path_name;  
+            filename = app.textfield_stl_filename.Value;
+            try
+                triangles = read_binary_stl_file(filename);
+            catch
+                triangles = read_ascii_stl(filename,1);
+            end
+            triangles_o = triangles;
+%             triangles = orient_stl(triangles,'z');
+            
+%             triangles = rotate_stl(triangles,'x',90);
+            
+            slice_height = .2;
+            tic;[app.movelist, app.z_slices] = slice_stl_create_path(triangles, slice_height);toc;   
+            %%
+%             [app.movelist, app.z_slices] = getTrajectoryListValue(app);
+            %%
+            %%
+%             app.movelist = removeNaNData(app.movelist,1);
+            range = 20;
+            [app.movelist, app.z_slices] = dataScale(app.movelist,app.z_slices,range);
+            app.step = 1;
+%            [app.movelist] = addPoints(app.movelist,app.step);
+            
+            creategcodeFile(full_file_path_name,app.movelist,app.z_slices);
+            
+            %% trajectory
+            %%
+            
+            plot_stl_app(app.UIAxes2_2,triangles_o);
+            Plotdelay = 0;%0.005;%0.1;
+            plot_slices_app(app.UIAxes21, app.movelist, app.z_slices, Plotdelay);
+%             app.mod_triangles = rotate_stl(app.mod_triangles,axis,app.RotationangleEditField.Value);
+
+            hold(app.UIAxes21,'off')
+            if length(app.movelist) >0
+                app.RunStopButton.Enable = true;
+            end
+            
+        end
+
+        % Button pushed function: CloseButton
+        function CloseButtonPushed(app, event)
+            delete(app);
+        end
+
+        % Button pushed function: GcodegeneratorButton
+        function GcodegeneratorButtonPushed(app, event)
+                        %%
+            [file, path] = uigetfile('*.stl');
+            full_file_path_name = strcat(path,file);
+            app.textfield_stl_filename.Value = full_file_path_name;  
+            filename = app.textfield_stl_filename.Value;
+            
+            triangles = read_binary_stl_file(filename);
+            triangles_o = triangles;
+%             triangles = orient_stl(triangles,'z');
+%             triangles = rotate_stl(triangles,'x',90);
+            slice_height = .2;
+            tic;[app.movelist, app.z_slices] = slice_stl_create_path(triangles, slice_height);toc;   
+
+            %%
+            creategcodeFile(full_file_path_name,app.movelist,app.z_slices);
+            
+        end
+    end
+
+    % Component initialization
+    methods (Access = private)
+
+        % Create UIFigure and components
+        function createComponents(app)
+
+            % Create EJetWidjet and hide until all components are created
+            app.EJetWidjet = uifigure('Visible', 'off');
+            app.EJetWidjet.Position = [100 100 805 561];
+            app.EJetWidjet.Name = 'UI Figure';
+            app.EJetWidjet.CloseRequestFcn = createCallbackFcn(app, @EJetWidjetCloseRequest, true);
+
+            % Create ExperimentLogTextAreaLabel
+            app.ExperimentLogTextAreaLabel = uilabel(app.EJetWidjet);
+            app.ExperimentLogTextAreaLabel.HorizontalAlignment = 'right';
+            app.ExperimentLogTextAreaLabel.Position = [13 522 90 22];
+            app.ExperimentLogTextAreaLabel.Text = 'Experiment Log';
+
+            % Create LogText
+            app.LogText = uitextarea(app.EJetWidjet);
+            app.LogText.ValueChangedFcn = createCallbackFcn(app, @LogTextValueChanged, true);
+            app.LogText.WordWrap = 'off';
+            app.LogText.Position = [13 347 255 176];
+
+            % Create SyringePumpPanel
+            app.SyringePumpPanel = uipanel(app.EJetWidjet);
+            app.SyringePumpPanel.Title = 'Syringe Pump';
+            app.SyringePumpPanel.FontWeight = 'bold';
+            app.SyringePumpPanel.Position = [14 169 255 158];
+
+            % Create SyringeDiammmEditFieldLabel
+            app.SyringeDiammmEditFieldLabel = uilabel(app.SyringePumpPanel);
+            app.SyringeDiammmEditFieldLabel.HorizontalAlignment = 'right';
+            app.SyringeDiammmEditFieldLabel.Position = [13 101 107 22];
+            app.SyringeDiammmEditFieldLabel.Text = 'Syringe Diam (mm)';
+
+            % Create SyringeDiamEditField
+            app.SyringeDiamEditField = uieditfield(app.SyringePumpPanel, 'numeric');
+            app.SyringeDiamEditField.Limits = [4 20];
+            app.SyringeDiamEditField.Position = [138 101 50 22];
+            app.SyringeDiamEditField.Value = 8;
+
+            % Create PumpRateLminLabel
+            app.PumpRateLminLabel = uilabel(app.SyringePumpPanel);
+            app.PumpRateLminLabel.Position = [18 74 113 22];
+            app.PumpRateLminLabel.Text = 'Pump Rate (µL/min)';
+
+            % Create PumpRateEditField
+            app.PumpRateEditField = uieditfield(app.SyringePumpPanel, 'numeric');
+            app.PumpRateEditField.Limits = [0 10];
+            app.PumpRateEditField.ValueChangedFcn = createCallbackFcn(app, @PumpRateEditFieldValueChanged, true);
+            app.PumpRateEditField.Position = [138 74 50 22];
+            app.PumpRateEditField.Value = 5;
+
+            % Create SyringePumpButton
+            app.SyringePumpButton = uibutton(app.SyringePumpPanel, 'state');
+            app.SyringePumpButton.ValueChangedFcn = createCallbackFcn(app, @SyringePumpButtonPressed, true);
+            app.SyringePumpButton.Text = 'On/Off';
+            app.SyringePumpButton.Position = [163 20 69 22];
+
+            % Create DirectionButtonGroup
+            app.DirectionButtonGroup = uibuttongroup(app.SyringePumpPanel);
+            app.DirectionButtonGroup.SelectionChangedFcn = createCallbackFcn(app, @DirectionButtonGroupSelectionChanged, true);
+            app.DirectionButtonGroup.TitlePosition = 'centertop';
+            app.DirectionButtonGroup.Title = 'Direction';
+            app.DirectionButtonGroup.Position = [16 13 134 45];
+
+            % Create FrontButton
+            app.FrontButton = uiradiobutton(app.DirectionButtonGroup);
+            app.FrontButton.Text = 'Front';
+            app.FrontButton.Position = [11 -1 50 22];
+            app.FrontButton.Value = true;
+
+            % Create ReverseButton
+            app.ReverseButton = uiradiobutton(app.DirectionButtonGroup);
+            app.ReverseButton.Text = 'Reverse';
+            app.ReverseButton.Position = [62 -1 66 22];
+
+            % Create HVPowerSupplyPanel
+            app.HVPowerSupplyPanel = uipanel(app.EJetWidjet);
+            app.HVPowerSupplyPanel.Title = 'HV Power Supply';
+            app.HVPowerSupplyPanel.FontWeight = 'bold';
+            app.HVPowerSupplyPanel.Position = [14 6 255 158];
+
+            % Create PowerSupplyButton
+            app.PowerSupplyButton = uibutton(app.HVPowerSupplyPanel, 'state');
+            app.PowerSupplyButton.ValueChangedFcn = createCallbackFcn(app, @PowerSupplyButtonPressed, true);
+            app.PowerSupplyButton.Text = 'On/Off';
+            app.PowerSupplyButton.Position = [163 14 69 22];
+
+            % Create VoltageVEditFieldLabel
+            app.VoltageVEditFieldLabel = uilabel(app.HVPowerSupplyPanel);
+            app.VoltageVEditFieldLabel.Position = [64 82 59 22];
+            app.VoltageVEditFieldLabel.Text = 'Voltage, V';
+
+            % Create VoltageEditField
+            app.VoltageEditField = uieditfield(app.HVPowerSupplyPanel, 'numeric');
+            app.VoltageEditField.Limits = [0 2000];
+            app.VoltageEditField.RoundFractionalValues = 'on';
+            app.VoltageEditField.ValueDisplayFormat = '%.0f';
+            app.VoltageEditField.ValueChangedFcn = createCallbackFcn(app, @VoltageEditFieldValueChanged, true);
+            app.VoltageEditField.Position = [138 82 53 22];
+            app.VoltageEditField.Value = 100;
+
+            % Create CurrentALabel
+            app.CurrentALabel = uilabel(app.HVPowerSupplyPanel);
+            app.CurrentALabel.Position = [63 58 67 22];
+            app.CurrentALabel.Text = 'Current, µA';
+
+            % Create CurrentEditField
+            app.CurrentEditField = uieditfield(app.HVPowerSupplyPanel, 'numeric');
+            app.CurrentEditField.Limits = [0 2000];
+            app.CurrentEditField.RoundFractionalValues = 'on';
+            app.CurrentEditField.ValueDisplayFormat = '%.0f';
+            app.CurrentEditField.ValueChangedFcn = createCallbackFcn(app, @CurrentEditFieldValueChanged, true);
+            app.CurrentEditField.Position = [138 58 53 22];
+            app.CurrentEditField.Value = 2000;
+
+            % Create Lamp
+            app.Lamp = uilamp(app.HVPowerSupplyPanel);
+            app.Lamp.Position = [214 85 18 18];
+            app.Lamp.Color = [0.902 0.902 0.902];
+
+            % Create CurrentOUT
+            app.CurrentOUT = uilabel(app.HVPowerSupplyPanel);
+            app.CurrentOUT.HorizontalAlignment = 'center';
+            app.CurrentOUT.FontName = 'Arial';
+            app.CurrentOUT.FontColor = [0.651 0.651 0.651];
+            app.CurrentOUT.Position = [199 58 29 22];
+            app.CurrentOUT.Text = '0.00';
+
+            % Create StageSettingsPanel
+            app.StageSettingsPanel = uipanel(app.EJetWidjet);
+            app.StageSettingsPanel.Title = 'Stage Settings';
+            app.StageSettingsPanel.FontWeight = 'bold';
+            app.StageSettingsPanel.Position = [277 6 517 534];
+
+            % Create UIAxes2_2
+            app.UIAxes2_2 = uiaxes(app.StageSettingsPanel);
+            title(app.UIAxes2_2, 'STL')
+            xlabel(app.UIAxes2_2, 'X')
+            ylabel(app.UIAxes2_2, 'Y')
+            zlabel(app.UIAxes2_2, 'Z')
+            app.UIAxes2_2.Position = [16 258 241 193];
+
+            % Create UIAxes21
+            app.UIAxes21 = uiaxes(app.StageSettingsPanel);
+            title(app.UIAxes21, 'Sliced')
+            xlabel(app.UIAxes21, 'X')
+            ylabel(app.UIAxes21, 'Y')
+            zlabel(app.UIAxes21, 'Z')
+            app.UIAxes21.Position = [265 258 241 193];
+
+            % Create StepmmEditFieldLabel
+            app.StepmmEditFieldLabel = uilabel(app.StageSettingsPanel);
+            app.StepmmEditFieldLabel.HorizontalAlignment = 'right';
+            app.StepmmEditFieldLabel.Position = [49 206 61 22];
+            app.StepmmEditFieldLabel.Text = 'Step (mm)';
+
+            % Create StepEditField
+            app.StepEditField = uieditfield(app.StageSettingsPanel, 'numeric');
+            app.StepEditField.Limits = [0 10];
+            app.StepEditField.ValueDisplayFormat = '%1.4g';
+            app.StepEditField.ValueChangedFcn = createCallbackFcn(app, @StepEditFieldValueChanged, true);
+            app.StepEditField.Position = [112 206 42 22];
+            app.StepEditField.Value = 1;
+
+            % Create XYaxesEditFieldLabel
+            app.XYaxesEditFieldLabel = uilabel(app.StageSettingsPanel);
+            app.XYaxesEditFieldLabel.HorizontalAlignment = 'right';
+            app.XYaxesEditFieldLabel.Position = [65 114 49 22];
+            app.XYaxesEditFieldLabel.Text = 'XY-axes';
+
+            % Create XYaxesVelocity
+            app.XYaxesVelocity = uieditfield(app.StageSettingsPanel, 'numeric');
+            app.XYaxesVelocity.Limits = [10 150];
+            app.XYaxesVelocity.ValueChangedFcn = createCallbackFcn(app, @XYaxesVelocityValueChanged, true);
+            app.XYaxesVelocity.Position = [119 113 34 22];
+            app.XYaxesVelocity.Value = 150;
+
+            % Create SpeedLabel
+            app.SpeedLabel = uilabel(app.StageSettingsPanel);
+            app.SpeedLabel.FontWeight = 'bold';
+            app.SpeedLabel.Position = [72 137 85 22];
+            app.SpeedLabel.Text = 'Speed (mm/s)';
+
+            % Create ZaxisEditFieldLabel
+            app.ZaxisEditFieldLabel = uilabel(app.StageSettingsPanel);
+            app.ZaxisEditFieldLabel.HorizontalAlignment = 'right';
+            app.ZaxisEditFieldLabel.Position = [75 88 39 22];
+            app.ZaxisEditFieldLabel.Text = 'Z-axis';
+
+            % Create ZaxisVelocity
+            app.ZaxisVelocity = uieditfield(app.StageSettingsPanel, 'numeric');
+            app.ZaxisVelocity.Limits = [0.1 5];
+            app.ZaxisVelocity.ValueChangedFcn = createCallbackFcn(app, @ZaxisVelocityValueChanged, true);
+            app.ZaxisVelocity.Position = [119 88 34 22];
+            app.ZaxisVelocity.Value = 5;
+
+            % Create RunStopButton
+            app.RunStopButton = uibutton(app.StageSettingsPanel, 'state');
+            app.RunStopButton.ValueChangedFcn = createCallbackFcn(app, @RunStopButtonValueChanged, true);
+            app.RunStopButton.Text = 'Run/Stop';
+            app.RunStopButton.Position = [403 11 100 22];
+
+            % Create XSliderLabel
+            app.XSliderLabel = uilabel(app.StageSettingsPanel);
+            app.XSliderLabel.VerticalAlignment = 'top';
+            app.XSliderLabel.Position = [222 189 16 13];
+            app.XSliderLabel.Text = 'X';
+
+            % Create XSlider
+            app.XSlider = uislider(app.StageSettingsPanel);
+            app.XSlider.Limits = [-11 11];
+            app.XSlider.MajorTicks = [-10 -8 -6 -4 -2 0 2 4 6 8 10];
+            app.XSlider.ValueChangingFcn = createCallbackFcn(app, @XSliderValueChanging, true);
+            app.XSlider.FontSize = 9;
+            app.XSlider.Position = [241 194 256 3];
+
+            % Create YSliderLabel
+            app.YSliderLabel = uilabel(app.StageSettingsPanel);
+            app.YSliderLabel.VerticalAlignment = 'top';
+            app.YSliderLabel.Position = [222 121 25 22];
+            app.YSliderLabel.Text = 'Y';
+
+            % Create YSlider
+            app.YSlider = uislider(app.StageSettingsPanel);
+            app.YSlider.Limits = [-11 11];
+            app.YSlider.MajorTicks = [-10 -8 -6 -4 -2 0 2 4 6 8 10];
+            app.YSlider.ValueChangingFcn = createCallbackFcn(app, @YSliderValueChanging, true);
+            app.YSlider.FontSize = 9;
+            app.YSlider.Position = [241 136 256 3];
+
+            % Create ZSliderLabel
+            app.ZSliderLabel = uilabel(app.StageSettingsPanel);
+            app.ZSliderLabel.VerticalAlignment = 'top';
+            app.ZSliderLabel.Position = [222 71 25 22];
+            app.ZSliderLabel.Text = 'Z';
+
+            % Create ZSlider
+            app.ZSlider = uislider(app.StageSettingsPanel);
+            app.ZSlider.Limits = [0 11];
+            app.ZSlider.MajorTicks = [0 2 4 6 8 10];
+            app.ZSlider.ValueChangingFcn = createCallbackFcn(app, @ZSliderValueChanging, true);
+            app.ZSlider.MinorTicks = [0 0.4 0.8 1.2 1.6 2 2.4 2.8 3.2 3.6 4 4.4 4.8 5.2 5.6 6 6.4 6.8 7.2 7.6 8 8.4 8.8 9.2 9.6 10 10.2 10.4 10.6 10.8 11];
+            app.ZSlider.FontSize = 9;
+            app.ZSlider.Position = [241 85 253 3];
+
+            % Create Xaxis
+            app.Xaxis = uilabel(app.StageSettingsPanel);
+            app.Xaxis.HorizontalAlignment = 'center';
+            app.Xaxis.FontName = 'Arial';
+            app.Xaxis.FontSize = 14;
+            app.Xaxis.FontColor = [0.651 0.651 0.651];
+            app.Xaxis.Position = [181 176 33 22];
+            app.Xaxis.Text = '0.00';
+
+            % Create Yaxis
+            app.Yaxis = uilabel(app.StageSettingsPanel);
+            app.Yaxis.HorizontalAlignment = 'center';
+            app.Yaxis.FontName = 'Arial';
+            app.Yaxis.FontSize = 14;
+            app.Yaxis.FontColor = [0.651 0.651 0.651];
+            app.Yaxis.Position = [181 118 33 22];
+            app.Yaxis.Text = '0.00';
+
+            % Create Zaxis
+            app.Zaxis = uilabel(app.StageSettingsPanel);
+            app.Zaxis.HorizontalAlignment = 'center';
+            app.Zaxis.FontName = 'Arial';
+            app.Zaxis.FontSize = 14;
+            app.Zaxis.FontColor = [0.651 0.651 0.651];
+            app.Zaxis.Position = [181 70 33 22];
+            app.Zaxis.Text = '0.00';
+
+            % Create PeriodsEditFieldLabel
+            app.PeriodsEditFieldLabel = uilabel(app.StageSettingsPanel);
+            app.PeriodsEditFieldLabel.HorizontalAlignment = 'right';
+            app.PeriodsEditFieldLabel.Position = [53 167 56 22];
+            app.PeriodsEditFieldLabel.Text = 'Period (s)';
+
+            % Create PeriodEditField
+            app.PeriodEditField = uieditfield(app.StageSettingsPanel, 'numeric');
+            app.PeriodEditField.Position = [113 167 41 22];
+            app.PeriodEditField.Value = 5;
+
+            % Create ZaxisNum
+            app.ZaxisNum = uieditfield(app.StageSettingsPanel, 'numeric');
+            app.ZaxisNum.Limits = [-11 11];
+            app.ZaxisNum.ValueChangedFcn = createCallbackFcn(app, @ZaxisNumValueChanged, true);
+            app.ZaxisNum.HorizontalAlignment = 'center';
+            app.ZaxisNum.Position = [101 54 55 22];
+
+            % Create SetRefButton
+            app.SetRefButton = uibutton(app.StageSettingsPanel, 'state');
+            app.SetRefButton.ValueChangedFcn = createCallbackFcn(app, @SetRefButtonValueChanged, true);
+            app.SetRefButton.Text = 'Set Ref';
+            app.SetRefButton.Position = [101 10 56 22];
+
+            % Create Panel
+            app.Panel = uipanel(app.StageSettingsPanel);
+            app.Panel.Position = [7 468 493 35];
+
+            % Create STLFileLabel
+            app.STLFileLabel = uilabel(app.Panel);
+            app.STLFileLabel.HorizontalAlignment = 'right';
+            app.STLFileLabel.Position = [1 5 53 22];
+            app.STLFileLabel.Text = 'STL File:';
+
+            % Create textfield_stl_filename
+            app.textfield_stl_filename = uieditfield(app.Panel, 'text');
+            app.textfield_stl_filename.Position = [58 5 234 22];
+            app.textfield_stl_filename.Value = 'Plane.stl';
+
+            % Create button_browse_stl_filename
+            app.button_browse_stl_filename = uibutton(app.Panel, 'push');
+            app.button_browse_stl_filename.ButtonPushedFcn = createCallbackFcn(app, @button_browse_stl_filenameButtonPushed, true);
+            app.button_browse_stl_filename.Position = [312 5 62 22];
+            app.button_browse_stl_filename.Text = 'Browse';
+
+            % Create GcodegeneratorButton
+            app.GcodegeneratorButton = uibutton(app.Panel, 'push');
+            app.GcodegeneratorButton.ButtonPushedFcn = createCallbackFcn(app, @GcodegeneratorButtonPushed, true);
+            app.GcodegeneratorButton.Position = [382 6 106 20];
+            app.GcodegeneratorButton.Text = 'Gcode generator';
+
+            % Create LayerLabel
+            app.LayerLabel = uilabel(app.StageSettingsPanel);
+            app.LayerLabel.Position = [185 209 57 22];
+            app.LayerLabel.Text = 'Layer';
+
+            % Create layerNoLabel
+            app.layerNoLabel = uilabel(app.StageSettingsPanel);
+            app.layerNoLabel.Position = [240 209 59 22];
+            app.layerNoLabel.Text = '0';
+
+            % Create CloseButton
+            app.CloseButton = uibutton(app.StageSettingsPanel, 'push');
+            app.CloseButton.ButtonPushedFcn = createCallbackFcn(app, @CloseButtonPushed, true);
+            app.CloseButton.Position = [256 10 43 23];
+            app.CloseButton.Text = 'Close';
+
+            % Show the figure after all components are created
+            app.EJetWidjet.Visible = 'on';
+        end
+    end
+
+    % App creation and deletion
+    methods (Access = public)
+
+        % Construct app
+        function app = E_Jet_Jiashu_3d
+
+            % Create UIFigure and components
+            createComponents(app)
+
+            % Register the app with App Designer
+            registerApp(app, app.EJetWidjet)
+
+            % Execute the startup function
+            runStartupFcn(app, @startupFcn)
+
+            if nargout == 0
+                clear app
+            end
+        end
+
+        % Code that executes before app deletion
+        function delete(app)
+
+            % Delete UIFigure when app is deleted
+            delete(app.EJetWidjet)
+        end
+    end
+end
